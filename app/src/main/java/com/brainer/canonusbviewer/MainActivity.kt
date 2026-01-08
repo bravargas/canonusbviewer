@@ -1,4 +1,9 @@
 package com.brainer.canonusbviewer
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.consumePositionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import kotlinx.coroutines.Job
 
 import android.Manifest
 import android.content.ContentUris
@@ -23,6 +28,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
@@ -491,18 +497,18 @@ private fun ZoomableAsyncImage(
 
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
 
-    // Fast gesture state
+    // Fast state
     var scale by remember(model) { mutableStateOf(zoomState.scale) }
     var offset by remember(model) { mutableStateOf(zoomState.offset) }
 
-    // IMPORTANT: observe "two fingers down" to allow pinch when scale == 1
+    // Detect 2 fingers to enable pinch
     var twoFingersDown by remember { mutableStateOf(false) }
 
-    // Keep latest values without recreating pointerInput
-    val scaleNow by androidx.compose.runtime.rememberUpdatedState(scale)
-    val offsetNow by androidx.compose.runtime.rememberUpdatedState(offset)
-    val onSingleTapNow by androidx.compose.runtime.rememberUpdatedState(onSingleTap)
-    val onZoomStateChangeNow by androidx.compose.runtime.rememberUpdatedState(onZoomStateChange)
+    // Fling job (to cancel when user touches again)
+    var flingJob by remember { mutableStateOf<Job?>(null) }
+
+    // For fling decay
+    val decay = androidx.compose.animation.core.exponentialDecay<Float>()
 
     fun clampOffset(s: Float, o: Offset): Offset {
         if (containerSize.width == 0 || containerSize.height == 0) return Offset.Zero
@@ -517,19 +523,11 @@ private fun ZoomableAsyncImage(
         )
     }
 
-    // Pinch zoom + pan
-    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-        onUserInteraction()
-
-        val newScale = (scale * zoomChange).coerceIn(1f, maxScale)
-        scale = newScale
-
-        offset =
-            if (newScale > 1f) clampOffset(newScale, offset + panChange)
-            else Offset.Zero
-
-        onZoomStateChangeNow(ZoomState(scale, offset))
+    fun stopFling() {
+        flingJob?.cancel()
+        flingJob = null
     }
+
 
     // Animatables ONLY for double-tap animation
     val scaleAnim = remember(model) { Animatable(scale) }
@@ -544,13 +542,14 @@ private fun ZoomableAsyncImage(
         }
         scale = scaleAnim.value
         offset = Offset(offsetXAnim.value, offsetYAnim.value)
-        onZoomStateChangeNow(ZoomState(scale, offset))
+        onZoomStateChange(ZoomState(scale, offset))
     }
 
-    // Enable transform only when:
-    // - already zoomed (scale > 1), or
-    // - user has 2 fingers down (starting pinch at 1x)
-    val transformEnabled = (scale > 1.001f) || twoFingersDown
+    // Enable transformable ONLY when 2 fingers are down (pinch start or pinch while zoomed)
+    val transformEnabled = twoFingersDown
+
+    // One-finger pan + fling ONLY when zoomed
+    val panEnabled = scale > 1.001f
 
     AsyncImage(
         model = model,
@@ -559,11 +558,11 @@ private fun ZoomableAsyncImage(
         modifier = modifier
             .onSizeChanged { containerSize = it }
 
-            // 1) Track pointer count (does not consume; only observes)
+            // (1) Track pointer count (2 fingers)
             .pointerInput(model) {
                 awaitPointerEventScope {
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
                         val pressed = event.changes.count { it.pressed }
                         twoFingersDown = pressed >= 2
                         if (pressed == 0) twoFingersDown = false
@@ -571,39 +570,157 @@ private fun ZoomableAsyncImage(
                 }
             }
 
-            // 2) Taps (stable keys: DO NOT include scale/offset)
-            .pointerInput(model, containerSize) {
-                detectTapGestures(
-                    onTap = { onSingleTapNow() },
-                    onDoubleTap = { tap ->
-                        val currScale = scaleNow
-                        val currOffset = offsetNow
+            .then(
+                if (twoFingersDown) {
+                    Modifier.pointerInput(model, containerSize) {
+                        // DetectTransformGestures "viejo": solo tiene onGesture(centroid, pan, zoom, rotation)
+                        while (true) {
+                            var started = false
 
-                        val targetScale =
-                            if (currScale <= 1.05f) doubleTapScale.coerceAtMost(maxScale) else 1f
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                if (!started) {
+                                    started = true
+                                    stopFling()
+                                }
 
-                        if (containerSize.width == 0 || containerSize.height == 0) {
-                            scope.launch { animateTo(targetScale, Offset.Zero) }
-                            return@detectTapGestures
-                        }
+                                onUserInteraction()
 
-                        if (targetScale == 1f) {
-                            scope.launch { animateTo(1f, Offset.Zero) }
-                        } else {
-                            val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
-                            val tapFromCenter = tap - center
-                            val scaleRatio = targetScale / currScale
+                                val newScale = (scale * zoom).coerceIn(1f, maxScale)
+                                scale = newScale
 
-                            val newOffset = currOffset - tapFromCenter * (scaleRatio - 1f)
-                            val clamped = clampOffset(targetScale, newOffset)
+                                offset =
+                                    if (newScale > 1f) clampOffset(newScale, offset + pan)
+                                    else Offset.Zero
 
-                            scope.launch { animateTo(targetScale, clamped) }
+                                onZoomStateChange(ZoomState(scale, offset))
+                            }
+
+                            // Gesture ended
+                            if (scale <= 1.001f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                                onZoomStateChange(ZoomState(scale, offset))
+                            }
                         }
                     }
-                )
-            }
+                } else {
+                    Modifier
+                }
+            )
 
-            // 3) Apply transforms
+
+            // (2) One-finger pan + fling (only when zoomed)
+            .then(
+                if (panEnabled) {
+                    Modifier.pointerInput(model, panEnabled) {
+                        val velocityTracker = VelocityTracker()
+
+                        detectDragGestures(
+                            onDragStart = {
+                                stopFling()
+                                velocityTracker.resetTracking()
+                                onUserInteraction()
+                            },
+                            onDrag = { change, dragAmount ->
+                                // IMPORTANT: consume only when we're handling pan (zoomed)
+                                change.consumePositionChange()
+                                onUserInteraction()
+
+                                // Apply drag
+                                offset = clampOffset(scale, offset + Offset(dragAmount.x, dragAmount.y))
+                                onZoomStateChange(ZoomState(scale, offset))
+
+                                // Track velocity
+                                velocityTracker.addPosition(
+                                    change.uptimeMillis,
+                                    change.position
+                                )
+                            },
+                            onDragEnd = {
+                                onUserInteraction()
+
+                                val v = velocityTracker.calculateVelocity()
+                                val start = offset
+
+                                // Start fling on both axes
+                                stopFling()
+                                flingJob = scope.launch {
+                                    val animX = Animatable(start.x)
+                                    val animY = Animatable(start.y)
+
+                                    coroutineScope {
+                                        launch {
+                                            animX.animateDecay(v.x, decay) {
+                                                val candidate = clampOffset(scale, Offset(value, animY.value))
+                                                offset = candidate
+                                                onZoomStateChange(ZoomState(scale, offset))
+                                            }
+                                        }
+                                        launch {
+                                            animY.animateDecay(v.y, decay) {
+                                                val candidate = clampOffset(scale, Offset(animX.value, value))
+                                                offset = candidate
+                                                onZoomStateChange(ZoomState(scale, offset))
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            onDragCancel = {
+                                stopFling()
+                            }
+                        )
+                    }
+                } else {
+                    Modifier
+                }
+            )
+
+            // (3) Taps
+            .then(
+                if (!twoFingersDown) {
+                    Modifier.pointerInput(model, containerSize) {
+                        detectTapGestures(
+                            onTap = {
+                                onUserInteraction()
+                                onSingleTap()
+                            },
+                            onDoubleTap = { tap ->
+                                onUserInteraction()
+                                stopFling()
+
+                                val currScale = scale
+                                val currOffset = offset
+
+                                val targetScale =
+                                    if (currScale <= 1.05f) doubleTapScale.coerceAtMost(maxScale) else 1f
+
+                                if (containerSize.width == 0 || containerSize.height == 0) {
+                                    scope.launch { animateTo(targetScale, Offset.Zero) }
+                                    return@detectTapGestures
+                                }
+
+                                if (targetScale == 1f) {
+                                    scope.launch { animateTo(1f, Offset.Zero) }
+                                } else {
+                                    val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                                    val tapFromCenter = tap - center
+                                    val scaleRatio = targetScale / currScale
+
+                                    val newOffset = currOffset - tapFromCenter * (scaleRatio - 1f)
+                                    val clamped = clampOffset(targetScale, newOffset)
+
+                                    scope.launch { animateTo(targetScale, clamped) }
+                                }
+                            }
+                        )
+                    }
+                } else {
+                    Modifier   // <- esto significa: "no agregues nada"
+                }
+            )
+
+            // (4) Apply transforms
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -611,13 +728,9 @@ private fun ZoomableAsyncImage(
                 translationY = offset.y
             }
 
-            // 4) Transformable: ONLY enabled when appropriate
-            .transformable(
-                state = transformState,
-                enabled = transformEnabled
-            )
     )
 }
+
 
 
 /* ============================================================

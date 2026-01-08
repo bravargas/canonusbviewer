@@ -50,9 +50,17 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation("io.coil-kt:coil-compose:2.6.0")
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
+// Images in Compose
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
+// DataStore (simple settings storage)
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+// Pager for swipe gestures
+    implementation("androidx.compose.foundation:foundation:1.6.8")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

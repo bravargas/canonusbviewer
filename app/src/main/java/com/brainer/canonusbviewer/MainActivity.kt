@@ -11,107 +11,150 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.io.File
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { CanonImportViewer() } }
+
+        // Full screen immersive by default
+        setImmersive(true)
+
+        setContent {
+            MaterialTheme {
+                AppRoot(
+                    setImmersive = { enabled -> applyImmersiveMode(enabled) }
+                )
+            }
+        }
+    }
+
+    private fun applyImmersiveMode(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val controller = window.insetsController
+            if (enabled) {
+                controller?.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller?.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            if (enabled) {
+                window.decorView.systemUiVisibility =
+                    (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            or View.SYSTEM_UI_FLAG_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+            } else {
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
     }
 }
 
-private enum class Screen { VIEWER, GALLERY }
+private enum class Screen { VIEWER, SETTINGS }
 
-private data class LocalPhoto(
-    val file: File,
-    val selected: Boolean = false
-)
-
-private data class NewestImage(
+private data class MediaPhoto(
     val id: Long,
     val uri: Uri,
     val name: String,
+    val dateAddedSeconds: Long,
     val relativePath: String?
 )
 
 @Composable
-private fun CanonImportViewer() {
+private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
-    var status by remember { mutableStateOf("Open Canon Camera Connect and take a photo.") }
-
-    var localPhotos by remember { mutableStateOf(loadLocalPhotos(context)) }
-    var fullScreen by remember { mutableStateOf(localPhotos.firstOrNull()?.file) }
+    val settings = remember { SettingsStore(context) }
 
     var screen by remember { mutableStateOf(Screen.VIEWER) }
+    var overlayVisible by remember { mutableStateOf(true) }
 
-    // mark app start so we ignore old gallery items
-    val appStartSeconds = remember { System.currentTimeMillis() / 1000 }
-
-    // Track already imported MediaStore IDs so we don’t re-import the same file
-    val importedIds = remember { mutableStateMapOf<Long, Boolean>() }
-
-    // Permission (Android 13+ vs older)
+    // Permission
     val perm = remember {
         if (Build.VERSION.SDK_INT >= 33) "android.permission.READ_MEDIA_IMAGES"
         else Manifest.permission.READ_EXTERNAL_STORAGE
     }
 
+    var status by remember { mutableStateOf("Waiting for Canon imports...") }
+
     val requestPerm = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        status = if (granted) {
-            "Permission granted. Waiting for Canon photos..."
-        } else {
-            "Permission denied. Cannot read imported photos."
-        }
+        status = if (granted) "Permission granted. Waiting for Canon imports..." else "Permission denied."
     }
 
     LaunchedEffect(Unit) {
         if (ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED) {
             requestPerm.launch(perm)
         } else {
-            status = "Permission granted. Waiting for Canon photos..."
+            status = "Permission granted. Waiting for Canon imports..."
         }
     }
 
-    // Observe MediaStore changes and auto-import newest Canon photo
-    DisposableEffect(Unit) {
+    // Config: folder filter (RELATIVE_PATH contains)
+    val folderContains by settings.cameraRelativePathContains.collectAsState(initial = "Canon EOS R50")
+
+    // Photos list (from MediaStore, system gallery)
+    var photos by remember { mutableStateOf<List<MediaPhoto>>(emptyList()) }
+
+    // Mark app start to avoid pulling very old photos if you want.
+    // You can later turn this into a setting; for now it helps UX.
+    val appStartSeconds = remember { System.currentTimeMillis() / 1000 }
+
+    // Load photos helper
+    fun refreshPhotos() {
+        photos = queryCanonPhotos(context, folderContains, minDateAddedSeconds = 0L) // show all in that folder
+        if (photos.isNotEmpty()) status = "Latest: ${photos.first().name}" else status = "No photos found in '$folderContains'."
+    }
+
+    // Initial load
+    LaunchedEffect(folderContains) {
+        refreshPhotos()
+    }
+
+    // Observe MediaStore changes -> refresh list, keep newest visible
+    DisposableEffect(folderContains) {
         val handler = Handler(Looper.getMainLooper())
         val observer = object : ContentObserver(handler) {
             override fun onChange(selfChange: Boolean) {
-                val newest = queryNewestCanonImage(context, appStartSeconds)
-                if (newest != null && importedIds[newest.id] != true) {
-                    try {
-                        val saved = copyMediaStoreUriToLocal(context, newest.uri, newest.name)
-                        importedIds[newest.id] = true
-
-                        localPhotos = loadLocalPhotos(context)
-                        fullScreen = saved
-                        status = "Imported: ${saved.name}"
-                        screen = Screen.VIEWER
-                    } catch (ex: Exception) {
-                        status = "Import error: ${ex.message}"
-                    }
+                // refresh, but if you want "only new since app open", use appStartSeconds here
+                val updated = queryCanonPhotos(context, folderContains, minDateAddedSeconds = appStartSeconds)
+                if (updated.isNotEmpty()) {
+                    // Merge strategy: simplest = full refresh
+                    refreshPhotos()
                 }
             }
         }
@@ -127,143 +170,210 @@ private fun CanonImportViewer() {
         }
     }
 
-    // UI: two screens
-    when (screen) {
-        Screen.VIEWER -> ViewerScreen(
-            status = status,
-            file = fullScreen,
-            onOpenGallery = { screen = Screen.GALLERY }
-        )
+    // Viewer pager
+    val pagerState = rememberPagerState(initialPage = 0) { photos.size }
 
-        Screen.GALLERY -> GalleryScreen(
-            status = status,
-            localPhotos = localPhotos,
-            onRefresh = {
-                localPhotos = loadLocalPhotos(context)
-                fullScreen = localPhotos.firstOrNull()?.file
-                status = "Refreshed local gallery."
-            },
-            onBackToViewer = { screen = Screen.VIEWER },
-            onSelectFull = { f ->
-                fullScreen = f
-                screen = Screen.VIEWER
-            },
-            onToggleSelected = { file, checked ->
-                localPhotos = localPhotos.map {
-                    if (it.file == file) it.copy(selected = checked) else it
+    // If new photos arrive, force pager to newest (page 0)
+    LaunchedEffect(photos.size) {
+        if (photos.isNotEmpty()) {
+            pagerState.scrollToPage(0)
+        }
+    }
+
+    when (screen) {
+        Screen.VIEWER -> {
+            setImmersive(true)
+
+            ViewerScreen(
+                status = status,
+                photos = photos,
+                pagerState = pagerState,
+                overlayVisible = overlayVisible,
+                onToggleOverlay = { overlayVisible = !overlayVisible },
+                onOpenSettings = { screen = Screen.SETTINGS },
+                onRefresh = { refreshPhotos() },
+                onSelectIndex = { index ->
+                    scope.launch { pagerState.animateScrollToPage(index) }
                 }
-            },
-            onDeleteSelected = {
-                val toDelete = localPhotos.filter { it.selected }
-                scope.launch(Dispatchers.IO) {
-                    toDelete.forEach { runCatching { it.file.delete() } }
-                }
-                localPhotos = loadLocalPhotos(context)
-                fullScreen = localPhotos.firstOrNull()?.file
-                status = "Deleted ${toDelete.size} photo(s)."
-            }
-        )
+            )
+        }
+
+        Screen.SETTINGS -> {
+            setImmersive(false)
+
+            SettingsScreen(
+                currentFolderContains = folderContains,
+                onSaveFolderContains = { newValue ->
+                    scope.launch(Dispatchers.IO) {
+                        settings.setCameraRelativePathContains(newValue.trim())
+                    }
+                },
+                onBack = { screen = Screen.VIEWER }
+            )
+        }
     }
 }
 
 @Composable
 private fun ViewerScreen(
     status: String,
-    file: File?,
-    onOpenGallery: () -> Unit
+    photos: List<MediaPhoto>,
+    pagerState: androidx.compose.foundation.pager.PagerState,
+    overlayVisible: Boolean,
+    onToggleOverlay: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectIndex: (Int) -> Unit
 ) {
-    Column(Modifier.fillMaxSize()) {
-        // Minimal top bar
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+    Box(Modifier.fillMaxSize()) {
+
+        // Full screen photo area; tap toggles overlay
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clickable { onToggleOverlay() }
         ) {
-            Text(
-                text = status,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f)
-            )
-            Button(onClick = onOpenGallery) { Text("Gallery") }
+            if (photos.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No photos yet.\nOpen Canon Camera Connect and take a photo.")
+                }
+            } else {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize()
+                ) { page ->
+                    val p = photos[page]
+                    AsyncImage(
+                        model = p.uri,
+                        contentDescription = p.name,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit // IMPORTANT: no crop
+                    )
+                }
+            }
         }
 
-        // Full screen image, no crop
-        Box(Modifier.fillMaxSize().padding(12.dp)) {
-            if (file == null) {
-                Text("No photo yet.")
-            } else {
-                AsyncImage(
-                    model = file,
-                    contentDescription = "Full screen photo",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit // IMPORTANT: no crop
+        if (overlayVisible) {
+            // Top overlay (status + file name + buttons)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color(0x88000000))
+                    .padding(12.dp)
+                    .align(Alignment.TopCenter)
+            ) {
+                val current = photos.getOrNull(pagerState.currentPage)
+                Text(
+                    text = if (current != null) "File: ${current.name}" else "File: (none)",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium
                 )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = status,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onRefresh) { Text("Refresh") }
+                    Button(onClick = onOpenSettings) { Text("Settings") }
+                }
+            }
+
+            // Bottom thumbnails overlay
+            if (photos.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0x88000000))
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                        .align(Alignment.BottomCenter),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(photos, key = { _, item -> item.id }) { index, item ->
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clickable { onSelectIndex(index) }
+                        ) {
+                            AsyncImage(
+                                model = item.uri,
+                                contentDescription = item.name,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                            if (index == pagerState.currentPage) {
+                                Box(
+                                    Modifier
+                                        .fillMaxSize()
+                                        .background(Color(0x55FFFFFF))
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun GalleryScreen(
-    status: String,
-    localPhotos: List<LocalPhoto>,
-    onRefresh: () -> Unit,
-    onBackToViewer: () -> Unit,
-    onSelectFull: (File) -> Unit,
-    onToggleSelected: (File, Boolean) -> Unit,
-    onDeleteSelected: () -> Unit
+private fun SettingsScreen(
+    currentFolderContains: String,
+    onSaveFolderContains: (String) -> Unit,
+    onBack: () -> Unit
 ) {
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(onClick = onBackToViewer) { Text("Back") }
-            Button(onClick = onRefresh) { Text("Refresh") }
-            Button(
-                onClick = onDeleteSelected,
-                enabled = localPhotos.any { it.selected }
-            ) { Text("Delete selected") }
+    var value by remember { mutableStateOf(currentFolderContains) }
+    var savedMsg by remember { mutableStateOf("") }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Settings", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(16.dp))
+
+        Text("Camera folder filter (MediaStore RELATIVE_PATH contains):")
+        Spacer(Modifier.height(6.dp))
+        OutlinedTextField(
+            value = value,
+            onValueChange = { value = it },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Example: Canon EOS R50") }
+        )
+
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                onSaveFolderContains(value)
+                savedMsg = "Saved."
+            }) { Text("Save") }
+
+            Button(onClick = onBack) { Text("Back") }
         }
 
-        Spacer(Modifier.height(8.dp))
-        Text(status, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.height(8.dp))
-
-        LazyColumn(Modifier.fillMaxSize()) {
-            items(localPhotos, key = { it.file.absolutePath }) { item ->
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    AsyncImage(
-                        model = item.file,
-                        contentDescription = "Thumbnail",
-                        modifier = Modifier.size(72.dp).clickable { onSelectFull(item.file) },
-                        contentScale = ContentScale.Crop
-                    )
-
-                    Column(Modifier.weight(1f)) {
-                        Text(item.file.name, style = MaterialTheme.typography.bodySmall)
-                        Text("${item.file.length()} bytes", style = MaterialTheme.typography.bodySmall)
-                    }
-
-                    Checkbox(
-                        checked = item.selected,
-                        onCheckedChange = { checked -> onToggleSelected(item.file, checked) }
-                    )
-                }
-                HorizontalDivider()
-            }
+        if (savedMsg.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(savedMsg)
         }
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Tip: If Canon Camera Connect changes the folder name, update the filter here.\n" +
+                    "The viewer uses swipe for previous/next, and tap to show/hide overlays."
+        )
     }
 }
 
 /**
- * Finds the newest image imported by Canon Camera Connect.
- * Filters by RELATIVE_PATH containing "Canon EOS R50"
- * and DATE_ADDED >= app start to ignore older items.
+ * Query images from MediaStore whose RELATIVE_PATH contains [folderContains],
+ * sorted newest first.
  */
-private fun queryNewestCanonImage(context: Context, minDateAddedSeconds: Long): NewestImage? {
+private fun queryCanonPhotos(
+    context: Context,
+    folderContains: String,
+    minDateAddedSeconds: Long
+): List<MediaPhoto> {
+
     val projection = arrayOf(
         MediaStore.Images.Media._ID,
         MediaStore.Images.Media.DISPLAY_NAME,
@@ -271,65 +381,44 @@ private fun queryNewestCanonImage(context: Context, minDateAddedSeconds: Long): 
         MediaStore.Images.Media.RELATIVE_PATH
     )
 
-    val selection = """
-        ${MediaStore.Images.Media.DATE_ADDED} >= ?
-        AND ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?
-    """.trimIndent()
+    val selection = buildString {
+        append("${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?")
+        if (minDateAddedSeconds > 0) {
+            append(" AND ${MediaStore.Images.Media.DATE_ADDED} >= ?")
+        }
+    }
 
-    val selectionArgs = arrayOf(
-        minDateAddedSeconds.toString(),
-        "%Canon EOS R50%"
-    )
+    val args = if (minDateAddedSeconds > 0) {
+        arrayOf("%$folderContains%", minDateAddedSeconds.toString())
+    } else {
+        arrayOf("%$folderContains%")
+    }
 
     val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
 
+    val out = mutableListOf<MediaPhoto>()
     context.contentResolver.query(
         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
         projection,
         selection,
-        selectionArgs,
+        args,
         sortOrder
     )?.use { cursor ->
-        if (!cursor.moveToFirst()) return null
+        val colId = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+        val colName = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        val colDate = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+        val colRel = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
 
-        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
-        val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME))
-        val rel = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH))
-        val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(colId)
+            val name = cursor.getString(colName) ?: "unknown.jpg"
+            val dateAdded = cursor.getLong(colDate)
+            val rel = cursor.getString(colRel)
 
-        return NewestImage(id = id, uri = uri, name = name, relativePath = rel)
+            val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            out.add(MediaPhoto(id, uri, name, dateAdded, rel))
+        }
     }
 
-    return null
-}
-
-private fun copyMediaStoreUriToLocal(context: Context, uri: Uri, displayName: String): File {
-    val dir = File(context.filesDir, "photos")
-    if (!dir.exists()) dir.mkdirs()
-
-    val safeName = displayName
-        .replace("\\", "_")
-        .replace("/", "_")
-        .ifBlank { "photo_${System.currentTimeMillis()}.jpg" }
-
-    val outFile = File(dir, "${System.currentTimeMillis()}_$safeName")
-
-    context.contentResolver.openInputStream(uri)?.use { input ->
-        outFile.outputStream().use { output ->
-            input.copyTo(output)
-        }
-    } ?: throw IllegalStateException("Cannot open input stream for $uri")
-
-    return outFile
-}
-
-private fun loadLocalPhotos(context: Context): List<LocalPhoto> {
-    val dir = File(context.filesDir, "photos")
-    if (!dir.exists()) return emptyList()
-
-    val files = dir.listFiles() ?: return emptyList()
-    return files
-        .filter { it.isFile && (it.name.endsWith(".jpg", true) || it.name.endsWith(".jpeg", true)) }
-        .sortedByDescending { it.lastModified() }
-        .map { LocalPhoto(it, selected = false) }
+    return out
 }

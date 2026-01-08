@@ -232,12 +232,15 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
                 pagerState = pagerState,
                 overlayVisible = overlayVisible,
                 onToggleOverlay = { overlayVisible = !overlayVisible },
+                onShowOverlay = { overlayVisible = true },
+                onHideOverlay = { overlayVisible = false },
                 onOpenSettings = { screen = Screen.SETTINGS },
                 onRefresh = { refreshPhotos() },
                 onSelectIndex = { index ->
                     scope.launch { pagerState.animateScrollToPage(index) }
                 }
             )
+
         }
 
         Screen.SETTINGS -> {
@@ -266,17 +269,41 @@ private fun ViewerScreen(
     pagerState: PagerState,
     overlayVisible: Boolean,
     onToggleOverlay: () -> Unit,
+    onShowOverlay: () -> Unit,
+    onHideOverlay: () -> Unit,
     onOpenSettings: () -> Unit,
     onRefresh: () -> Unit,
     onSelectIndex: (Int) -> Unit
 ) {
-    // Zoom state per page
+    // ===== Zoom state per page =====
     var zoomStates by remember(photos) {
         mutableStateOf(List(photos.size) { ZoomState() })
     }
+    // ==============================
 
+    // ===== PASO C: Auto-hide overlay =====
+    val autoHideMillis = 2500L
+    var lastUserActivity by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    fun bumpUserActivity() {
+        lastUserActivity = System.currentTimeMillis()
+    }
+
+    LaunchedEffect(overlayVisible, lastUserActivity) {
+        if (!overlayVisible) return@LaunchedEffect
+        kotlinx.coroutines.delay(autoHideMillis)
+
+        val idleFor = System.currentTimeMillis() - lastUserActivity
+        if (overlayVisible && idleFor >= autoHideMillis) {
+            onHideOverlay()
+        }
+    }
+    // ===== FIN PASO C =====
+
+    // ===== ESTO ES LO QUE FALTABA =====
     val currentZoom = zoomStates.getOrNull(pagerState.currentPage) ?: ZoomState()
     val pagerScrollEnabled = currentZoom.scale <= 1.001f
+    // ================================
 
     Box(Modifier.fillMaxSize()) {
 
@@ -305,7 +332,12 @@ private fun ViewerScreen(
                         onZoomStateChange = { zs ->
                             zoomStates = zoomStates.toMutableList().also { it[page] = zs }
                         },
-                        onSingleTap = { onToggleOverlay() }
+                        onUserInteraction = { bumpUserActivity() },
+                        onSingleTap = {
+                            bumpUserActivity()
+                            if (overlayVisible) onHideOverlay() else onShowOverlay()
+                        }
+
                     )
                 }
             }
@@ -334,8 +366,9 @@ private fun ViewerScreen(
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onRefresh) { Text("Refresh") }
-                    Button(onClick = onOpenSettings) { Text("Settings") }
+                    Button(onClick = { bumpUserActivity(); onRefresh() }) { Text("Refresh") }
+                    Button(onClick = { bumpUserActivity(); onOpenSettings() }) { Text("Settings") }
+
                 }
             }
 
@@ -353,7 +386,11 @@ private fun ViewerScreen(
                         Box(
                             modifier = Modifier
                                 .size(72.dp)
-                                .clickable { onSelectIndex(index) }
+                                .clickable {
+                                    bumpUserActivity()
+                                    onSelectIndex(index)
+                                }
+
                         ) {
                             AsyncImage(
                                 model = item.uri,
@@ -447,6 +484,7 @@ private fun ZoomableAsyncImage(
     doubleTapScale: Float = 2f,
     zoomState: ZoomState,
     onZoomStateChange: (ZoomState) -> Unit,
+    onUserInteraction: () -> Unit,
     onSingleTap: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -481,6 +519,8 @@ private fun ZoomableAsyncImage(
 
     // Pinch zoom + pan
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        onUserInteraction()
+
         val newScale = (scale * zoomChange).coerceIn(1f, maxScale)
         scale = newScale
 

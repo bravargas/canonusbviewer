@@ -18,6 +18,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -58,29 +60,32 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+
+/* ============================================================
+   Activity
+   ============================================================ */
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // IMPORTANT: apply immersive AFTER decorView exists
-        window.decorView.post {
-            applyImmersiveMode(true)
-        }
+        // Apply immersive after decorView exists
+        window.decorView.post { applyImmersiveMode(true) }
 
         setContent {
             MaterialTheme {
-                AppRoot(
-                    setImmersive = { enabled -> applyImmersiveMode(enabled) }
-                )
+                AppRoot(setImmersive = { enabled -> applyImmersiveMode(enabled) })
             }
         }
     }
@@ -89,7 +94,6 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 30) {
             val controller = window.decorView.windowInsetsController
             if (controller == null) {
-                // If still null, try again shortly
                 window.decorView.post { applyImmersiveMode(enabled) }
                 return
             }
@@ -103,21 +107,24 @@ class MainActivity : ComponentActivity() {
             }
         } else {
             @Suppress("DEPRECATION")
-            if (enabled) {
-                window.decorView.systemUiVisibility =
-                    (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            or View.SYSTEM_UI_FLAG_FULLSCREEN
-                            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
-            } else {
-                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-            }
+            window.decorView.systemUiVisibility =
+                if (enabled) {
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                } else {
+                    View.SYSTEM_UI_FLAG_VISIBLE
+                }
         }
     }
-
 }
+
+/* ============================================================
+   Models / State
+   ============================================================ */
 
 private enum class Screen { VIEWER, SETTINGS }
 
@@ -129,6 +136,15 @@ private data class MediaPhoto(
     val relativePath: String?
 )
 
+private data class ZoomState(
+    val scale: Float = 1f,
+    val offset: Offset = Offset.Zero
+)
+
+/* ============================================================
+   Root
+   ============================================================ */
+
 @Composable
 private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     val context = LocalContext.current
@@ -137,14 +153,13 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
 
     var screen by remember { mutableStateOf(Screen.VIEWER) }
     var overlayVisible by remember { mutableStateOf(true) }
+    var status by remember { mutableStateOf("Waiting for Canon imports...") }
 
     // Permission
-    val perm = remember {
-        if (Build.VERSION.SDK_INT >= 33) "android.permission.READ_MEDIA_IMAGES"
-        else Manifest.permission.READ_EXTERNAL_STORAGE
-    }
-
-    var status by remember { mutableStateOf("Waiting for Canon imports...") }
+    val permission = if (Build.VERSION.SDK_INT >= 33)
+        Manifest.permission.READ_MEDIA_IMAGES
+    else
+        Manifest.permission.READ_EXTERNAL_STORAGE
 
     val requestPerm = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -153,20 +168,20 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(context, perm) != PackageManager.PERMISSION_GRANTED) {
-            requestPerm.launch(perm)
+        if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+            requestPerm.launch(permission)
         } else {
             status = "Permission granted. Waiting for Canon imports..."
         }
     }
 
-    // Config: folder filter (RELATIVE_PATH contains)
+    // Config: folder filter
     val folderContains by settings.cameraRelativePathContains.collectAsState(initial = "Canon EOS R50")
 
-    // Photos list (from MediaStore, system gallery)
+    // Photos list
     var photos by remember { mutableStateOf<List<MediaPhoto>>(emptyList()) }
 
-    // Mark app start to avoid pulling very old photos if desired
+    // Mark app start
     val appStartSeconds = remember { System.currentTimeMillis() / 1000 }
 
     fun refreshPhotos() {
@@ -174,9 +189,7 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
         status = if (photos.isNotEmpty()) "Latest: ${photos.first().name}" else "No photos found in '$folderContains'."
     }
 
-    LaunchedEffect(folderContains) {
-        refreshPhotos()
-    }
+    LaunchedEffect(folderContains) { refreshPhotos() }
 
     // Observe MediaStore changes -> refresh list
     DisposableEffect(folderContains) {
@@ -213,7 +226,6 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     when (screen) {
         Screen.VIEWER -> {
             setImmersive(true)
-
             ViewerScreen(
                 status = status,
                 photos = photos,
@@ -230,7 +242,6 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
 
         Screen.SETTINGS -> {
             setImmersive(false)
-
             SettingsScreen(
                 currentFolderContains = folderContains,
                 onSaveFolderContains = { newValue ->
@@ -244,6 +255,10 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     }
 }
 
+/* ============================================================
+   Viewer
+   ============================================================ */
+
 @Composable
 private fun ViewerScreen(
     status: String,
@@ -255,6 +270,14 @@ private fun ViewerScreen(
     onRefresh: () -> Unit,
     onSelectIndex: (Int) -> Unit
 ) {
+    // Zoom state per page
+    var zoomStates by remember(photos) {
+        mutableStateOf(List(photos.size) { ZoomState() })
+    }
+
+    val currentZoom = zoomStates.getOrNull(pagerState.currentPage) ?: ZoomState()
+    val pagerScrollEnabled = currentZoom.scale <= 1.001f
+
     Box(Modifier.fillMaxSize()) {
 
         // Full screen photo area
@@ -266,7 +289,8 @@ private fun ViewerScreen(
             } else {
                 HorizontalPager(
                     state = pagerState,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    userScrollEnabled = pagerScrollEnabled
                 ) { page ->
                     val p = photos[page]
 
@@ -274,9 +298,13 @@ private fun ViewerScreen(
                         model = p.uri,
                         contentDescription = p.name,
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit, // IMPORTANT: no crop
+                        contentScale = ContentScale.Fit,
                         maxScale = 6f,
                         doubleTapScale = 2f,
+                        zoomState = zoomStates[page],
+                        onZoomStateChange = { zs ->
+                            zoomStates = zoomStates.toMutableList().also { it[page] = zs }
+                        },
                         onSingleTap = { onToggleOverlay() }
                     )
                 }
@@ -284,7 +312,7 @@ private fun ViewerScreen(
         }
 
         if (overlayVisible) {
-            // Top overlay (status + file name + buttons)
+            // Top overlay
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -348,6 +376,10 @@ private fun ViewerScreen(
     }
 }
 
+/* ============================================================
+   Settings
+   ============================================================ */
+
 @Composable
 private fun SettingsScreen(
     currentFolderContains: String,
@@ -389,17 +421,21 @@ private fun SettingsScreen(
         Spacer(Modifier.height(24.dp))
         Text(
             "Tip: If Canon Camera Connect changes the folder name, update the filter here.\n" +
-                    "Viewer: swipe for previous/next. Single tap toggles overlays. Double tap toggles 2x/1x. Pinch zoom supported."
+                    "Viewer: swipe for previous/next. Single tap toggles overlays. Double tap zooms to finger. Pinch zoom supported."
         )
     }
 }
+
+/* ============================================================
+   Zoomable Image
+   ============================================================ */
 
 /**
  * Zoomable image:
  * - Pinch zoom
  * - Pan (only when zoomed)
- * - Double tap toggles 2x <-> 1x
- * - Single tap calls [onSingleTap] (for overlay show/hide)
+ * - Double tap zoom to finger with animation
+ * - Single tap calls [onSingleTap] (overlay show/hide)
  */
 @Composable
 private fun ZoomableAsyncImage(
@@ -409,52 +445,144 @@ private fun ZoomableAsyncImage(
     contentScale: ContentScale = ContentScale.Fit,
     maxScale: Float = 6f,
     doubleTapScale: Float = 2f,
+    zoomState: ZoomState,
+    onZoomStateChange: (ZoomState) -> Unit,
     onSingleTap: () -> Unit
 ) {
-    var scale by remember(model) { mutableStateOf(1f) }
-    var offset by remember(model) { mutableStateOf(Offset.Zero) }
+    val scope = rememberCoroutineScope()
 
-    fun reset() {
-        scale = 1f
-        offset = Offset.Zero
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    // Fast gesture state
+    var scale by remember(model) { mutableStateOf(zoomState.scale) }
+    var offset by remember(model) { mutableStateOf(zoomState.offset) }
+
+    // IMPORTANT: observe "two fingers down" to allow pinch when scale == 1
+    var twoFingersDown by remember { mutableStateOf(false) }
+
+    // Keep latest values without recreating pointerInput
+    val scaleNow by androidx.compose.runtime.rememberUpdatedState(scale)
+    val offsetNow by androidx.compose.runtime.rememberUpdatedState(offset)
+    val onSingleTapNow by androidx.compose.runtime.rememberUpdatedState(onSingleTap)
+    val onZoomStateChangeNow by androidx.compose.runtime.rememberUpdatedState(onZoomStateChange)
+
+    fun clampOffset(s: Float, o: Offset): Offset {
+        if (containerSize.width == 0 || containerSize.height == 0) return Offset.Zero
+        if (s <= 1f) return Offset.Zero
+
+        val maxX = (containerSize.width * (s - 1f)) / 2f
+        val maxY = (containerSize.height * (s - 1f)) / 2f
+
+        return Offset(
+            o.x.coerceIn(-maxX, maxX),
+            o.y.coerceIn(-maxY, maxY)
+        )
     }
 
+    // Pinch zoom + pan
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         val newScale = (scale * zoomChange).coerceIn(1f, maxScale)
         scale = newScale
 
-        // Only pan when zoomed; reset offset when back to 1x
-        offset = if (scale > 1f) offset + panChange else Offset.Zero
+        offset =
+            if (newScale > 1f) clampOffset(newScale, offset + panChange)
+            else Offset.Zero
+
+        onZoomStateChangeNow(ZoomState(scale, offset))
     }
+
+    // Animatables ONLY for double-tap animation
+    val scaleAnim = remember(model) { Animatable(scale) }
+    val offsetXAnim = remember(model) { Animatable(offset.x) }
+    val offsetYAnim = remember(model) { Animatable(offset.y) }
+
+    suspend fun animateTo(targetScale: Float, targetOffset: Offset) {
+        coroutineScope {
+            launch { scaleAnim.animateTo(targetScale, tween(220)) }
+            launch { offsetXAnim.animateTo(targetOffset.x, tween(220)) }
+            launch { offsetYAnim.animateTo(targetOffset.y, tween(220)) }
+        }
+        scale = scaleAnim.value
+        offset = Offset(offsetXAnim.value, offsetYAnim.value)
+        onZoomStateChangeNow(ZoomState(scale, offset))
+    }
+
+    // Enable transform only when:
+    // - already zoomed (scale > 1), or
+    // - user has 2 fingers down (starting pinch at 1x)
+    val transformEnabled = (scale > 1.001f) || twoFingersDown
 
     AsyncImage(
         model = model,
         contentDescription = contentDescription,
         contentScale = contentScale,
         modifier = modifier
-            // Tap & double-tap handling
+            .onSizeChanged { containerSize = it }
+
+            // 1) Track pointer count (does not consume; only observes)
             .pointerInput(model) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.count { it.pressed }
+                        twoFingersDown = pressed >= 2
+                        if (pressed == 0) twoFingersDown = false
+                    }
+                }
+            }
+
+            // 2) Taps (stable keys: DO NOT include scale/offset)
+            .pointerInput(model, containerSize) {
                 detectTapGestures(
-                    onTap = { onSingleTap() },
-                    onDoubleTap = {
-                        if (abs(scale - 1f) < 0.01f) {
-                            scale = doubleTapScale.coerceAtMost(maxScale)
-                            offset = Offset.Zero
+                    onTap = { onSingleTapNow() },
+                    onDoubleTap = { tap ->
+                        val currScale = scaleNow
+                        val currOffset = offsetNow
+
+                        val targetScale =
+                            if (currScale <= 1.05f) doubleTapScale.coerceAtMost(maxScale) else 1f
+
+                        if (containerSize.width == 0 || containerSize.height == 0) {
+                            scope.launch { animateTo(targetScale, Offset.Zero) }
+                            return@detectTapGestures
+                        }
+
+                        if (targetScale == 1f) {
+                            scope.launch { animateTo(1f, Offset.Zero) }
                         } else {
-                            reset()
+                            val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                            val tapFromCenter = tap - center
+                            val scaleRatio = targetScale / currScale
+
+                            val newOffset = currOffset - tapFromCenter * (scaleRatio - 1f)
+                            val clamped = clampOffset(targetScale, newOffset)
+
+                            scope.launch { animateTo(targetScale, clamped) }
                         }
                     }
                 )
             }
+
+            // 3) Apply transforms
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
                 translationX = offset.x
                 translationY = offset.y
             }
-            .transformable(state = transformState)
+
+            // 4) Transformable: ONLY enabled when appropriate
+            .transformable(
+                state = transformState,
+                enabled = transformEnabled
+            )
     )
 }
+
+
+/* ============================================================
+   MediaStore Query
+   ============================================================ */
 
 /**
  * Query images from MediaStore whose RELATIVE_PATH contains [folderContains],

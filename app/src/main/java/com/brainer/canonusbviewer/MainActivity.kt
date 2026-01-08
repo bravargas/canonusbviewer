@@ -20,32 +20,61 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Full screen immersive by default
-        setImmersive(true)
+        // IMPORTANT: apply immersive AFTER decorView exists
+        window.decorView.post {
+            applyImmersiveMode(true)
+        }
 
         setContent {
             MaterialTheme {
@@ -58,13 +87,19 @@ class MainActivity : ComponentActivity() {
 
     private fun applyImmersiveMode(enabled: Boolean) {
         if (Build.VERSION.SDK_INT >= 30) {
-            val controller = window.insetsController
+            val controller = window.decorView.windowInsetsController
+            if (controller == null) {
+                // If still null, try again shortly
+                window.decorView.post { applyImmersiveMode(enabled) }
+                return
+            }
+
             if (enabled) {
-                controller?.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                controller?.systemBarsBehavior =
+                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior =
                     WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             } else {
-                controller?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
             }
         } else {
             @Suppress("DEPRECATION")
@@ -81,6 +116,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
 }
 
 private enum class Screen { VIEWER, SETTINGS }
@@ -130,30 +166,25 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
     // Photos list (from MediaStore, system gallery)
     var photos by remember { mutableStateOf<List<MediaPhoto>>(emptyList()) }
 
-    // Mark app start to avoid pulling very old photos if you want.
-    // You can later turn this into a setting; for now it helps UX.
+    // Mark app start to avoid pulling very old photos if desired
     val appStartSeconds = remember { System.currentTimeMillis() / 1000 }
 
-    // Load photos helper
     fun refreshPhotos() {
-        photos = queryCanonPhotos(context, folderContains, minDateAddedSeconds = 0L) // show all in that folder
-        if (photos.isNotEmpty()) status = "Latest: ${photos.first().name}" else status = "No photos found in '$folderContains'."
+        photos = queryCanonPhotos(context, folderContains, minDateAddedSeconds = 0L)
+        status = if (photos.isNotEmpty()) "Latest: ${photos.first().name}" else "No photos found in '$folderContains'."
     }
 
-    // Initial load
     LaunchedEffect(folderContains) {
         refreshPhotos()
     }
 
-    // Observe MediaStore changes -> refresh list, keep newest visible
+    // Observe MediaStore changes -> refresh list
     DisposableEffect(folderContains) {
         val handler = Handler(Looper.getMainLooper())
         val observer = object : ContentObserver(handler) {
             override fun onChange(selfChange: Boolean) {
-                // refresh, but if you want "only new since app open", use appStartSeconds here
                 val updated = queryCanonPhotos(context, folderContains, minDateAddedSeconds = appStartSeconds)
                 if (updated.isNotEmpty()) {
-                    // Merge strategy: simplest = full refresh
                     refreshPhotos()
                 }
             }
@@ -170,7 +201,6 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
         }
     }
 
-    // Viewer pager
     val pagerState = rememberPagerState(initialPage = 0) { photos.size }
 
     // If new photos arrive, force pager to newest (page 0)
@@ -218,7 +248,7 @@ private fun AppRoot(setImmersive: (Boolean) -> Unit) {
 private fun ViewerScreen(
     status: String,
     photos: List<MediaPhoto>,
-    pagerState: androidx.compose.foundation.pager.PagerState,
+    pagerState: PagerState,
     overlayVisible: Boolean,
     onToggleOverlay: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -227,12 +257,8 @@ private fun ViewerScreen(
 ) {
     Box(Modifier.fillMaxSize()) {
 
-        // Full screen photo area; tap toggles overlay
-        Box(
-            Modifier
-                .fillMaxSize()
-                .clickable { onToggleOverlay() }
-        ) {
+        // Full screen photo area
+        Box(Modifier.fillMaxSize()) {
             if (photos.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("No photos yet.\nOpen Canon Camera Connect and take a photo.")
@@ -243,11 +269,15 @@ private fun ViewerScreen(
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
                     val p = photos[page]
-                    AsyncImage(
+
+                    ZoomableAsyncImage(
                         model = p.uri,
                         contentDescription = p.name,
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit // IMPORTANT: no crop
+                        contentScale = ContentScale.Fit, // IMPORTANT: no crop
+                        maxScale = 6f,
+                        doubleTapScale = 2f,
+                        onSingleTap = { onToggleOverlay() }
                     )
                 }
             }
@@ -359,9 +389,71 @@ private fun SettingsScreen(
         Spacer(Modifier.height(24.dp))
         Text(
             "Tip: If Canon Camera Connect changes the folder name, update the filter here.\n" +
-                    "The viewer uses swipe for previous/next, and tap to show/hide overlays."
+                    "Viewer: swipe for previous/next. Single tap toggles overlays. Double tap toggles 2x/1x. Pinch zoom supported."
         )
     }
+}
+
+/**
+ * Zoomable image:
+ * - Pinch zoom
+ * - Pan (only when zoomed)
+ * - Double tap toggles 2x <-> 1x
+ * - Single tap calls [onSingleTap] (for overlay show/hide)
+ */
+@Composable
+private fun ZoomableAsyncImage(
+    model: Any?,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+    maxScale: Float = 6f,
+    doubleTapScale: Float = 2f,
+    onSingleTap: () -> Unit
+) {
+    var scale by remember(model) { mutableStateOf(1f) }
+    var offset by remember(model) { mutableStateOf(Offset.Zero) }
+
+    fun reset() {
+        scale = 1f
+        offset = Offset.Zero
+    }
+
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        val newScale = (scale * zoomChange).coerceIn(1f, maxScale)
+        scale = newScale
+
+        // Only pan when zoomed; reset offset when back to 1x
+        offset = if (scale > 1f) offset + panChange else Offset.Zero
+    }
+
+    AsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        contentScale = contentScale,
+        modifier = modifier
+            // Tap & double-tap handling
+            .pointerInput(model) {
+                detectTapGestures(
+                    onTap = { onSingleTap() },
+                    onDoubleTap = {
+                        if (abs(scale - 1f) < 0.01f) {
+                            scale = doubleTapScale.coerceAtMost(maxScale)
+                            offset = Offset.Zero
+                        } else {
+                            reset()
+                        }
+                    }
+                )
+            }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            }
+            .transformable(state = transformState)
+    )
 }
 
 /**

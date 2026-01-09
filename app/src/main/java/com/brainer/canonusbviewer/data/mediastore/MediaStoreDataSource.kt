@@ -41,7 +41,8 @@ class MediaStoreDataSource(private val context: Context) {
         val photos = mutableListOf<MediaPhoto>()
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATE_ADDED
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.DISPLAY_NAME
         )
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
         val selectionArgs = arrayOf("%$folderFilter%")
@@ -56,15 +57,17 @@ class MediaStoreDataSource(private val context: Context) {
         )?.use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+            val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idColumn)
                 val dateAdded = cursor.getLong(dateAddedColumn)
+                val displayName = cursor.getString(displayNameColumn)
                 val uri = ContentUris.withAppendedId(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     id
                 )
-                photos.add(MediaPhoto(id, uri, dateAdded))
+                photos.add(MediaPhoto(uri, dateAdded, displayName))
             }
         }
         photos

@@ -8,27 +8,27 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.Icon
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import com.brainer.canonusbviewer.model.Photo
+import com.brainer.canonusbviewer.model.MediaPhoto
 
 @Composable
 fun ThumbnailRow(
-    photos: List<Photo>,
+    photos: List<MediaPhoto>,
     currentIndex: Int,
+    listState: LazyListState = rememberLazyListState(),
     onSelectIndex: (Int) -> Unit
 ) {
     LazyRow(
+        state = listState,
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0x88000000))
@@ -52,14 +52,6 @@ fun ThumbnailRow(
                         Modifier
                             .fillMaxSize()
                             .background(Color(0x55FFFFFF))
-                    )
-                }
-                if (item.rating > 0) {
-                    Icon(
-                        imageVector = Icons.Filled.Star,
-                        contentDescription = "Rating",
-                        tint = Color.Yellow,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp)
                     )
                 }
             }

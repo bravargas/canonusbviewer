@@ -16,8 +16,9 @@ class SettingsStore(private val context: Context) {
     private val cameraRelativePathKey = stringPreferencesKey("camera_relative_path_contains")
 
     val cameraRelativePathContains: Flow<String>
-        get() = context.dataStore.data.map {
-            it[cameraRelativePathKey] ?: "Canon EOS R50"
+        get() = context.dataStore.data.map { preferences ->
+            // Default to the user's preferred folder name.
+            preferences[cameraRelativePathKey] ?: "Canon EOS R50"
         }
 
     suspend fun setCameraRelativePathContains(value: String) {

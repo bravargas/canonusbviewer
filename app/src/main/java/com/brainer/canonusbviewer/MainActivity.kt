@@ -9,13 +9,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
+import com.brainer.canonusbviewer.data.settings.SettingsStore
 import com.brainer.canonusbviewer.ui.AppRoot
 import com.brainer.canonusbviewer.viewmodel.ViewerViewModel
 import com.brainer.canonusbviewer.viewmodel.ViewerViewModelFactory
 
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: ViewerViewModel by viewModels { ViewerViewModelFactory(applicationContext) }
+    private val viewModel: ViewerViewModel by viewModels {
+        // This factory now creates the one and only ViewModel for the activity
+        // and it gets its own single instance of the SettingsStore.
+        ViewerViewModelFactory(applicationContext, SettingsStore(applicationContext))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -24,6 +29,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
+                // The single ViewModel instance is now passed down to the UI.
                 AppRoot(
                     viewModel = viewModel,
                     setImmersive = { enabled -> applyImmersiveMode(enabled) }

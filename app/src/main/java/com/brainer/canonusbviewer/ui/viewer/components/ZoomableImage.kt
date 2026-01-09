@@ -29,8 +29,7 @@ fun ZoomableImage(
     modifier: Modifier = Modifier,
     zoomState: ZoomState,
     onZoomStateChange: (ZoomState) -> Unit,
-    onSingleTap: () -> Unit,
-    onUserInteraction: () -> Unit
+    onSingleTap: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
@@ -67,14 +66,10 @@ fun ZoomableImage(
         contentScale = ContentScale.Fit,
         modifier = modifier
             .onSizeChanged { containerSize = it }
-            .pointerInput(zoomState) { // KEY CHANGE: Re-create gesture detector when zoomState changes
+            .pointerInput(zoomState) { // Re-create gesture detector when zoomState changes
                 detectTapGestures(
-                    onTap = {
-                        onUserInteraction()
-                        onSingleTap()
-                    },
+                    onTap = { onSingleTap() },
                     onDoubleTap = { tap ->
-                        onUserInteraction()
                         val targetScale = if (zoomState.scale > 1.05f) 1f else 2f // Use tolerance
                         if (targetScale == 1f) {
                             scope.launch { animateTo(1f, Offset.Zero) }
@@ -88,11 +83,10 @@ fun ZoomableImage(
                     }
                 )
             }
-            .pointerInput(zoomState.scale > 1.05f) { // Use boolean to attach/detach drag
+            .pointerInput(zoomState.scale > 1.05f) { // Attach/detach drag gesture
                  if (zoomState.scale > 1.05f) {
                     detectDragGestures {
                         change, dragAmount ->
-                            onUserInteraction()
                             change.consume()
                             val newOffset = zoomState.offset + dragAmount
                             onZoomStateChange(zoomState.copy(offset = clampOffset(zoomState.scale, newOffset)))

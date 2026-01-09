@@ -67,7 +67,7 @@ fun ZoomableImage(
         contentScale = ContentScale.Fit,
         modifier = modifier
             .onSizeChanged { containerSize = it }
-            .pointerInput(Unit) {
+            .pointerInput(zoomState) { // KEY CHANGE: Re-create gesture detector when zoomState changes
                 detectTapGestures(
                     onTap = {
                         onUserInteraction()
@@ -75,7 +75,7 @@ fun ZoomableImage(
                     },
                     onDoubleTap = { tap ->
                         onUserInteraction()
-                        val targetScale = if (zoomState.scale > 1f) 1f else 2f
+                        val targetScale = if (zoomState.scale > 1.05f) 1f else 2f // Use tolerance
                         if (targetScale == 1f) {
                             scope.launch { animateTo(1f, Offset.Zero) }
                         } else {
@@ -88,8 +88,8 @@ fun ZoomableImage(
                     }
                 )
             }
-            .pointerInput(zoomState.scale) {
-                 if (zoomState.scale > 1f) {
+            .pointerInput(zoomState.scale > 1.05f) { // Use boolean to attach/detach drag
+                 if (zoomState.scale > 1.05f) {
                     detectDragGestures {
                         change, dragAmount ->
                             onUserInteraction()

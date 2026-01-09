@@ -20,7 +20,6 @@ class MediaStoreDataSource(private val context: Context) {
     fun getPhotoFlow(folderFilter: String): Flow<List<MediaPhoto>> = callbackFlow {
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
-                // Launch a coroutine to call the suspend function
                 launch { send(queryPhotos(folderFilter)) }
             }
         }
@@ -31,7 +30,6 @@ class MediaStoreDataSource(private val context: Context) {
             observer
         )
 
-        // Initial emit, also in a coroutine
         launch { send(queryPhotos(folderFilter)) }
 
         awaitClose {
@@ -66,7 +64,7 @@ class MediaStoreDataSource(private val context: Context) {
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     id
                 )
-                photos.add(MediaPhoto(uri, dateAdded))
+                photos.add(MediaPhoto(id, uri, dateAdded))
             }
         }
         photos

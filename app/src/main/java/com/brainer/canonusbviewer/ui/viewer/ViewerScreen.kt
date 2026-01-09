@@ -1,13 +1,16 @@
 package com.brainer.canonusbviewer.ui.viewer
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.material3.Button
@@ -23,8 +26,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import com.brainer.canonusbviewer.model.MediaPhoto
+import com.brainer.canonusbviewer.model.Photo
 import com.brainer.canonusbviewer.model.ZoomState
+import com.brainer.canonusbviewer.ui.viewer.components.RatingBar
 import com.brainer.canonusbviewer.ui.viewer.components.ThumbnailRow
 import com.brainer.canonusbviewer.ui.viewer.components.ZoomableImage
 import kotlinx.coroutines.delay
@@ -32,15 +36,18 @@ import kotlinx.coroutines.delay
 @Composable
 fun ViewerScreen(
     status: String,
-    photos: List<MediaPhoto>,
+    photos: List<Photo>,
     pagerState: PagerState,
     zoomStates: List<ZoomState>,
     overlayVisible: Boolean,
+    minRatingFilter: Int,
     onZoomStateChange: (Int, ZoomState) -> Unit,
     onToggleOverlay: () -> Unit,
     onHideOverlay: () -> Unit,
     onOpenSettings: () -> Unit,
-    onSelectIndex: (Int) -> Unit
+    onSelectIndex: (Int) -> Unit,
+    onSetRating: (Long, Int) -> Unit,
+    onSetMinRatingFilter: (Int) -> Unit
 ) {
     var lastUserActivity by remember { mutableStateOf(System.currentTimeMillis()) }
 
@@ -105,7 +112,25 @@ fun ViewerScreen(
                     style = MaterialTheme.typography.bodySmall
                 )
                 Spacer(Modifier.height(10.dp))
-                Button(onClick = { bumpUserActivity(); onOpenSettings() }) { Text("Settings") }
+                if (current != null) {
+                    RatingBar(
+                        rating = current.rating,
+                        onRatingChange = { rating ->
+                            bumpUserActivity()
+                            onSetRating(current.mediaStoreId, rating)
+                        }
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { bumpUserActivity(); onOpenSettings() }) { Text("Settings") }
+                    Button(onClick = { 
+                        bumpUserActivity()
+                        onSetMinRatingFilter(if (minRatingFilter == 0) 1 else 0) 
+                    }) {
+                        Text(if (minRatingFilter == 0) "Filter > 0" else "All")
+                    }
+                }
             }
 
             if (photos.isNotEmpty()) {
